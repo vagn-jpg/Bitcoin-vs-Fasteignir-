@@ -1,32 +1,43 @@
 # app.py
 # Streamlit dashboard: Iceland Housing Price Index vs Bitcoin (ISK)
 # Author: ChatGPT for Vagn (@vagn)
-import time
+import os, time
 import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime, timezone
 import plotly.express as px
+from typing import Optional
 
 st.set_page_config(page_title="Íbúðaverð vs Bitcoin (ISK)", layout="wide")
 
 st.title("Íbúðaverð á Íslandi vs Bitcoin (ISK)")
-st.caption("Samanburður frá upphafi Bitcoin. Íbúðavísitala er mánaðarleg; Bitcoin er rauntíma.\n"
-           "⚙️ CoinGecko-köll eru skyndiminni-læst í 1 klst til að forðast tímabundnar villur.")
+st.caption(
+    "Samanburður frá upphafi Bitcoin. Íbúðavísitala er mánaðarleg; Bitcoin er rauntíma.\n"
+    "⚙️ Vörn gegn 429: BTC-saga er sótt að hámarki **1× á sólarhring** og vistuð í skrá. Ef sókn bilar, er notuð síðasta vistaða útgáfa."
+)
 
-# ----------------------
-# HTTP helpers með mildum retry og kurteisum hausum
-# ----------------------
 DEFAULT_HEADERS = {
-    "User-Agent": "Iceland-Housing-vs-BTC/1.0 (Streamlit; contact: example@example.com)"
+    "User-Agent": "Iceland-Housing-vs-BTC/1.1 (Streamlit on Render/HF; contact: example@example.com)"
 }
 
-def http_get(url, params=None, timeout=30, tries=2, backoff=1.2):
+def http_get(url, params=None, timeout=30, tries=2, backoff=2.0):
     last_err = None
     for i in range(tries):
         try:
             r = requests.get(url, params=params, timeout=timeout, headers=DEFAULT_HEADERS)
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait_s = None
+                try:
+                    wait_s = int(retry_after) if retry_after else None
+                except Exception:
+                    wait_s = None
+                if i < tries - 1:
+                    time.sleep(wait_s if wait_s else backoff**i)
+                    continue
+                r.raise_for_status()
             r.raise_for_status()
             return r
         except Exception as e:
@@ -35,11 +46,22 @@ def http_get(url, params=None, timeout=30, tries=2, backoff=1.2):
                 time.sleep(backoff**i)
     raise last_err
 
-def http_post(url, json_payload=None, timeout=30, tries=2, backoff=1.2):
+def http_post(url, json_payload=None, timeout=30, tries=2, backoff=2.0):
     last_err = None
     for i in range(tries):
         try:
             r = requests.post(url, json=json_payload, timeout=timeout, headers=DEFAULT_HEADERS)
+            if r.status_code == 429:
+                retry_after = r.headers.get("Retry-After")
+                wait_s = None
+                try:
+                    wait_s = int(retry_after) if retry_after else None
+                except Exception:
+                    wait_s = None
+                if i < tries - 1:
+                    time.sleep(wait_s if wait_s else backoff**i)
+                    continue
+                r.raise_for_status()
             r.raise_for_status()
             return r
         except Exception as e:
@@ -48,31 +70,44 @@ def http_post(url, json_payload=None, timeout=30, tries=2, backoff=1.2):
                 time.sleep(backoff**i)
     raise last_err
 
-# ----------------------
-# Gögn: BTC saga + live (ISK), Íbúðaverðsvísitala frá PXWeb
-# ----------------------
-def fetch_btc_history_isk():
+DATA_DIR = "/tmp/iceland-housing-vs-btc"
+os.makedirs(DATA_DIR, exist_ok=True)
+BTC_HISTORY_CSV = os.path.join(DATA_DIR, "btc_history_isk.csv")
+
+def fetch_btc_history_isk_raw() -> pd.DataFrame:
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
-    r = http_get(url, params={"vs_currency":"isk", "days":"max"}, timeout=30)
+    r = http_get(url, params={"vs_currency":"isk", "days":"max"}, timeout=30, tries=2)
     data = r.json()["prices"]
-    df = pd.DataFrame(data, columns=["ms","price_isk"])
-    # convert to Reykjavik time (UTC)
+    df = pd.DataFrame(data, columns=["ms","price_isk"]
     df["date"] = pd.to_datetime(df["ms"], unit="ms", utc=True).dt.tz_convert("Atlantic/Reykjavik").dt.date
     df = df.groupby("date", as_index=False)["price_isk"].mean()
-    df["date"] = pd.to_datetime(df["date"])  # normalize to midnight-naive for plotting
+    df["date"] = pd.to_datetime(df["date"]) 
     return df
 
-def fetch_btc_live_isk():
+def fetch_btc_history_isk_with_file_cache() -> pd.DataFrame:
+    try:
+        df = fetch_btc_history_isk_raw()
+        df.to_csv(BTC_HISTORY_CSV, index=False)
+        return df
+    except Exception as e:
+        if os.path.exists(BTC_HISTORY_CSV):
+            df = pd.read_csv(BTC_HISTORY_CSV)
+            df["date"] = pd.to_datetime(df["date"])
+            return df
+        raise e
+
+def fetch_btc_live_isk() -> Optional[float]:
     url = "https://api.coingecko.com/api/v3/simple/price"
-    r = http_get(url, params={"ids":"bitcoin","vs_currencies":"isk"}, timeout=15)
-    return float(r.json()["bitcoin"]["isk"])
+    try:
+        r = http_get(url, params={"ids":"bitcoin","vs_currencies":"isk"}, timeout=15, tries=2)
+        return float(r.json()["bitcoin"]["isk"])
+    except Exception:
+        return None
 
 def _default_px_url():
-    # Likleg slóð á VIS01106 (Residential property market price index).
     return "https://px.hagstofa.is/en/api/v1/en/Efnahagur/visitolur/1_vnv/3_greiningarvisitolur/VIS01106.px"
 
 def fetch_housing_index_pxweb(px_url: str, from_month: str = "2009M01"):
-    """Sækir íslenska íbúðaverðsvísitölu (heildarland). Skilar ['date','hpi'] mánaðarlega."""
     payloads = [
         {
             "query": [
@@ -100,11 +135,11 @@ def fetch_housing_index_pxweb(px_url: str, from_month: str = "2009M01"):
     last_err = None
     for payload in payloads:
         try:
-            r = http_post(px_url, json_payload=payload, timeout=30)
+            r = http_post(px_url, json_payload=payload, timeout=30, tries=2)
             data = r.json()["data"]
             rows = []
             for d in data:
-                month_label = d["key"][0]  # t.d. '2025M10'
+                month_label = d["key"][0]
                 val = float(d["values"][0])
                 rows.append({"month": month_label, "hpi": val})
             df = pd.DataFrame(rows)
@@ -127,24 +162,18 @@ def aggregate_btc_monthly(btc_df: pd.DataFrame, method: str = "mean"):
     btc_m["date"] = btc_m["ym"].dt.to_timestamp("M")
     return btc_m[["date","ym","price_isk"]]
 
-# ----------------------
-# Caching / skyndiminni
-# ----------------------
-@st.cache_data(ttl=3600)  # 1 klst
-def load_btc():
-    return fetch_btc_history_isk()
+@st.cache_data(ttl=24*3600)
+def load_btc_history():
+    return fetch_btc_history_isk_with_file_cache()
 
-@st.cache_data(ttl=3600)  # 1 klst
+@st.cache_data(ttl=3600)
 def load_btc_live_isk_cached():
     return fetch_btc_live_isk()
 
-@st.cache_data(ttl=24*3600)  # 24 klst
+@st.cache_data(ttl=24*3600)
 def load_housing(px_url: str, from_month: str):
     return fetch_housing_index_pxweb(px_url, from_month=from_month)
 
-# ----------------------
-# Sidebar controls
-# ----------------------
 with st.sidebar:
     st.header("Stillingar")
     source = st.radio("Uppruni íbúðavísitölu", ["PXWeb API (sjálfvirkt)", "Hlaða upp CSV"], index=0)
@@ -157,20 +186,17 @@ with st.sidebar:
     if source == "Hlaða upp CSV":
         uploaded = st.file_uploader("CSV með dálkunum: date (YYYY-MM-DD eða YYYY-MM) og hpi", type=["csv"])
 
-# ----------------------
-# Data loading
-# ----------------------
-btc = load_btc()
-
 try:
-    live = load_btc_live_isk_cached()
-except Exception:
-    live = None
+    btc = load_btc_history()
+except Exception as e:
+    st.error("Gat ekki sótt BTC söguna og engin vistuð útgáfa fannst. Reyndu aftur síðar.\n\nNánar: {}".format(e))
+    st.stop()
 
+live = load_btc_live_isk_cached()
 if live is not None:
     st.info(f"Rauntíma BTC≈ISK (cached ≤1 klst): {live:,.0f} ISK")
 else:
-    st.info("Rauntíma BTC≈ISK: ekki tiltækt í bili (reynir aftur innan 1 klst).")
+    st.info("Rauntíma BTC≈ISK: ekki tiltækt í bili (reynir aftur innan 1 klst – nota áfram sögu).")
 
 if source == "PXWeb API (sjálfvirkt)":
     try:
@@ -185,7 +211,6 @@ else:
         st.stop()
     try:
         dfu = pd.read_csv(uploaded)
-        # normalize columns
         cols = {c.lower().strip(): c for c in dfu.columns}
         date_col = cols.get("date") or cols.get("month") or list(dfu.columns)[0]
         hpi_col = cols.get("hpi") or cols.get("index") or cols.get("value") or list(dfu.columns)[1]
@@ -199,9 +224,6 @@ else:
         st.error(f"Gat ekki lesið CSV: {e}")
         st.stop()
 
-# ----------------------
-# Merge + metrics
-# ----------------------
 btc_m = aggregate_btc_monthly(btc, method="last" if btc_agg=="Loka-gildi mánaðar" else "mean")
 hpi["ym"] = hpi["date"].dt.to_period("M")
 btc_m["ym"] = btc_m["date"].dt.to_period("M")
@@ -217,9 +239,6 @@ base = df.iloc[0]
 df["hpi_norm"] = 100 * df["hpi"] / base["hpi"]
 df["btc_norm"] = 100 * df["price_isk"] / base["price_isk"]
 
-# ----------------------
-# Charts
-# ----------------------
 c1, c2 = st.columns(2)
 with c1:
     st.subheader("Íbúðaverðsvísitala (heildarland)")
@@ -245,4 +264,4 @@ with st.expander("Sýna gagnatöflu"):
         "index_over_btc":"Vísitala/BTC"
     }))
 
-st.caption("Heimildir: Hagstofa Íslands (PXWeb) og CoinGecko API. CoinGecko-köll í þessu appi eru skyndiminni-læst (≤1 klst) til að draga úr tímabundnum villum og kvótum.")
+st.caption("Heimildir: Hagstofa Íslands (PXWeb) og CoinGecko API. BTC-saga: 24 klst cache + skráavistun; ef sókn mistekst (t.d. 429), er síðasta vistun notuð.")
