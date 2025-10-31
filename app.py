@@ -13,8 +13,7 @@ st.set_page_config(page_title="Íbúðaverð vs Bitcoin (ISK)", layout="wide")
 
 st.title("Íbúðaverð á Íslandi vs Bitcoin (ISK)")
 st.caption(
-    "Samanburður frá upphafi Bitcoin. Íbúðavísitala er mánaðarleg; Bitcoin er sótt frá Yahoo Finance (BTC-USD × USD/ISK).
-"
+    "Samanburður frá upphafi Bitcoin. Íbúðavísitala er mánaðarleg; Bitcoin er sótt frá Yahoo Finance (BTC-USD × USD/ISK)."
     "⚙️ Engin CoinGecko notkun; við notum yfinance og gjaldmiðlapar 'USDISK=X' (með 'ISK=X' sem varaleið)."
 )
 
