@@ -78,7 +78,7 @@ def fetch_btc_history_isk_raw() -> pd.DataFrame:
     url = "https://api.coingecko.com/api/v3/coins/bitcoin/market_chart"
     r = http_get(url, params={"vs_currency":"isk", "days":"max"}, timeout=30, tries=2)
     data = r.json()["prices"]
-    df = pd.DataFrame(data, columns=["ms","price_isk"]
+    df = pd.DataFrame(data, columns=["ms","price_isk"])
     df["date"] = pd.to_datetime(df["ms"], unit="ms", utc=True).dt.tz_convert("Atlantic/Reykjavik").dt.date
     df = df.groupby("date", as_index=False)["price_isk"].mean()
     df["date"] = pd.to_datetime(df["date"]) 
